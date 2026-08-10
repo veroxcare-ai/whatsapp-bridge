@@ -1,0 +1,18 @@
+# Render blueprint — free, no credit card, no persistent disk needed
+# (the WhatsApp session is stored in Supabase, so restarts don't lose it).
+# Render: New → Blueprint → connect the GitHub repo → set SUPABASE_SERVICE_KEY.
+services:
+  - type: web
+    name: verox-whatsapp-bridge
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /status
+    envVars:
+      - key: ALLOW_ORIGIN
+        value: https://veroxcare.net
+      - key: SUPABASE_URL
+        value: https://mjjtgmjftfberlhoogzg.supabase.co
+      - key: SUPABASE_SERVICE_KEY
+        sync: false   # SECRET — paste in the Render dashboard, never in the repo
