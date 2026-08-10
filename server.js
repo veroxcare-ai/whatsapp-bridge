@@ -20,7 +20,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, WebSocket } from 'ws';
 import qrcode from 'qrcode';
 import { createClient } from '@supabase/supabase-js';
 import P from 'pino';
@@ -34,7 +34,11 @@ const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 if (!SUPABASE_URL || !SUPABASE_KEY) console.error('[bridge] Missing SUPABASE_URL / SUPABASE_SERVICE_KEY.');
-const supabase = createClient(SUPABASE_URL || '', SUPABASE_KEY || '', { auth: { persistSession: false } });
+// Provide the "ws" WebSocket to Supabase realtime (required on Node < 22).
+const supabase = createClient(SUPABASE_URL || '', SUPABASE_KEY || '', {
+  auth: { persistSession: false },
+  realtime: { transport: WebSocket }
+});
 const logger = P({ level: 'silent' });
 
 const app = express();
