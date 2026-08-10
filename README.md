@@ -1,56 +1,62 @@
-# VEROX WhatsApp bridge — free hosting, no card, no session drop
+# VEROX WhatsApp bridge — free, no bank card
 
-This bridge uses **Baileys** (WhatsApp **Web** protocol via Linked Devices — NOT the paid
-Cloud API). It's lightweight (no Chromium) and stores its session in **Supabase**, so it
-reconnects to the same WhatsApp session after any restart — **no QR re-scan**.
+Uses **Baileys** (WhatsApp **Web**, not the paid API). The session is stored in **Supabase**, so it
+reconnects to the same WhatsApp after any restart/reboot — **no QR re-scan** (you only re-scan if you
+unlink the device on the phone, or the phone is offline ~14 days).
 
-## Why the session never drops
-The usual problem: free hosts wipe local files on restart, so the WhatsApp login is lost.
-Here the login (creds + keys) is saved in the Supabase `whatsapp_auth` table, not on disk.
-So restart / sleep-wake / redeploy → the bridge reads the session back → stays logged in.
-(You only re-scan if YOU remove the linked device from the phone, or WhatsApp unlinks it
-after the phone is offline for ~14 days.)
+> The reality in 2026: free, no-card, 24/7 **cloud** hosting is basically gone (Render/Railway/Fly want
+> a card; Hugging Face now charges for Docker Spaces). The reliable free path is to run it on a device
+> you already have. It's simpler than it sounds.
 
 ---
 
-## Free setup, no bank card — step by step
+## 🥇 Simplest — run it on the reception PC (free, no card, no tunnel)
+The reception uses the WhatsApp CRM on their PC anyway, so run the bridge on that same PC. The CRM page
+(from veroxcare.net) talks to `ws://localhost:8787` on the same machine — no public tunnel needed.
 
-**1) Create the session table (once).**
-Supabase → SQL Editor → run [`supabase/whatsapp-auth.sql`](../supabase/whatsapp-auth.sql).
+1. Install **Node.js 20+** from nodejs.org.
+2. Put the `whatsapp-bridge` folder on the PC. Copy `.env.example` → `.env` and fill your keys
+   (`SUPABASE_SERVICE_KEY` = your Supabase service_role key).
+3. Double-click **`start.bat`**. First run installs everything and shows the bridge on `localhost:8787`.
+4. Open the reception **واتساب CRM** screen → scan the QR once.
+5. **Auto-start:** put a shortcut to `start.bat` in the Startup folder
+   (`Win+R` → `shell:startup` → drop the shortcut). Now every morning the PC turns on, the bridge
+   starts and **reconnects from Supabase automatically — no QR**.
 
-**2) Get your Supabase service key** (server-side secret — do NOT put it in the website):
-Supabase → Project Settings → API → **`service_role`** key. Keep it for step 4.
+Trade-offs (fine for a clinic): the WhatsApp screen works on that reception PC; while the PC is off at
+night, messages simply arrive the next morning when it reconnects (WhatsApp holds them).
 
-**3) Push this `whatsapp-bridge/` folder to the GitHub repo** `veroxcare-ai/whatsapp-bridge`.
+## 🥈 Always-on / from anywhere — an old Android phone (free)
+Want it running 24/7 and reachable from any device (e.g. admin at home)? Use a spare **Android phone**
+left plugged in — it never “turns off” like a PC.
 
-**4) Deploy on Render Free (no credit card required).**
-- Render → New → **Blueprint** → pick the repo (it reads `render.yaml`), *or* New → Web Service.
-- Runtime: Node · Build: `npm install` · Start: `node server.js` · Plan: **Free**.
-- Environment variables:
-  - `SUPABASE_URL` = `https://mjjtgmjftfberlhoogzg.supabase.co`
-  - `SUPABASE_SERVICE_KEY` = *(the service_role key from step 2)*
-  - `ALLOW_ORIGIN` = `https://veroxcare.net`
-- Deploy. Open the service URL — you'll get `{ ok: true, status: "qr" }`.
+1. Install **Termux** (from F-Droid). Then:
+   ```bash
+   pkg update && pkg install nodejs git -y
+   git clone https://github.com/veroxcare-ai/whatsapp-bridge && cd whatsapp-bridge
+   cp .env.example .env && nano .env      # fill your keys
+   bash start.sh
+   ```
+2. Give it a public URL with a **free Cloudflare Tunnel** (no card):
+   ```bash
+   pkg install cloudflared -y
+   cloudflared tunnel --url http://localhost:8787
+   ```
+   It prints an `https://…` URL → that's the bridge URL. (A *named* tunnel on your Cloudflare account
+   gives a fixed URL like `bridge.veroxcare.net` — nicer, set up once.)
+3. Keep the phone awake: disable battery optimization for Termux; `start.sh` already grabs a wake-lock.
 
-**5) Keep it awake (free, no card).** Render Free sleeps after 15 min idle — which would drop
-the live connection. Prevent it with a free pinger every ~10 minutes:
-- **UptimeRobot** (free, no card): add an HTTP monitor on `https://<your-app>.onrender.com/status`, interval 5–10 min.
-- or **cron-job.org** (free, no card): a job hitting the same URL every 10 min.
-This keeps the process alive 24/7, so messages arrive in real time. Render Free gives 750
-hours/month — enough for one always-on service.
-
-**6) Scan once.** Open the reception **واتساب CRM** screen → it shows the QR from the bridge →
-scan with the clinic's WhatsApp (Linked Devices). Done — and it stays linked after that.
+## When you're ready to pay a little
+A cheap **VPS (~$4/month)** is the clean, worry-free long-term home for a 24/7 WhatsApp bridge.
+Same files, `bash start.sh`, done. (Most VPS still want a card, but it's the proper upgrade.)
 
 ---
 
-## Notes
-- **Cost:** Render Free + UptimeRobot/cron-job.org + Supabase Free = **$0, no card**.
-- If later you want zero cold-starts and full 24/7 guarantees, a cheap VPS (~$4/mo) is the
-  upgrade — but the free stack above works for a clinic.
-- After it's deployed and reachable, send me the Render URL and I'll wire it into
-  `app/whatsapp.html` (replace the demo QR with the live QR + real message stream via `/status`,
-  the WebSocket, and `/send`).
+## What I need from you
+Tell me which path you picked. If it's the **reception PC (localhost)**, I wire the CRM to
+`ws://localhost:8787`. If it's the **phone + tunnel**, send me the tunnel URL. Either way I then replace
+the demo connect in `app/whatsapp.html` with the live QR + real messages. Keep `SUPABASE_SERVICE_KEY`
+secret (in `.env`), don't send it to me.
 
 ## Endpoints
-`GET /` and `GET /status` (state + QR), `POST /send {to, body}`, `WS /` (streams qr/status/message).
+`GET /` · `GET /status` (state + QR) · `POST /send {to, body}` · `WS /` (streams qr/status/message).
