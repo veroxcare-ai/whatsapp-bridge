@@ -41,6 +41,23 @@ const supabase = createClient(SUPABASE_URL || '', SUPABASE_KEY || '', {
 });
 const logger = P({ level: 'silent' });
 
+// ---- message persistence (so history + conversations survive navigation/restart) ----
+const textOf = (m) => m.message?.conversation || m.message?.extendedTextMessage?.text || m.message?.imageMessage?.caption || m.message?.videoMessage?.caption || '';
+async function persist(rows) {
+  rows = (rows || []).filter(Boolean);
+  if (!rows.length) return;
+  try { await supabase.from('wa_messages').upsert(rows, { onConflict: 'id' }); }
+  catch (e) { console.warn('[wa] persist', e.message || e); }
+}
+function rowOf(sid, m) {
+  const jid = m.key?.remoteJid;
+  if (!jid || jid === 'status@broadcast') return null;
+  const body = textOf(m);
+  if (!body) return null;
+  const waid = m.key.id || ('x' + Math.random().toString(36).slice(2));
+  return { id: sid + '_' + waid, msg_id: waid, session_id: sid, chat_jid: jid, from_me: !!m.key.fromMe, name: m.pushName || null, body, ts: Number(m.messageTimestamp) || Math.floor(Date.now() / 1000) };
+}
+
 const app = express();
 app.use(cors({ origin: ALLOW_ORIGIN }));
 app.use(express.json());
@@ -67,7 +84,7 @@ async function startSession(id, label, assignedTo) {
     version, logger,
     auth: { creds: auth.state.creds, keys: makeCacheableSignalKeyStore(auth.state.keys, logger) },
     printQRInTerminal: false, browser: ['VEROX CRM', 'Chrome', '2.0'],
-    markOnlineOnConnect: false, syncFullHistory: false
+    markOnlineOnConnect: false, syncFullHistory: true
   });
   e.sock = sock; e.auth = auth;
 
@@ -85,11 +102,21 @@ async function startSession(id, label, assignedTo) {
     }
   });
   sock.ev.on('messages.upsert', ({ messages, type }) => {
-    if (type !== 'notify') return;
+    if (type !== 'notify' && type !== 'append') return;
+    const rows = [];
     for (const m of messages) {
-      const text = m.message?.conversation || m.message?.extendedTextMessage?.text || '';
-      broadcast('message', { sessionId: id, id: m.key.id, from: m.key.remoteJid, fromMe: m.key.fromMe, name: m.pushName || null, text, timestamp: Number(m.messageTimestamp) });
+      const text = textOf(m); const jid = m.key?.remoteJid;
+      if (!jid || jid === 'status@broadcast' || !text) continue;
+      broadcast('message', { sessionId: id, id: m.key.id, from: jid, fromMe: !!m.key.fromMe, name: m.pushName || null, text, timestamp: Number(m.messageTimestamp) });
+      rows.push(rowOf(id, m));
     }
+    persist(rows);
+  });
+
+  // recent history WhatsApp syncs to a newly-linked device
+  sock.ev.on('messaging-history.set', ({ messages }) => {
+    if (!messages || !messages.length) return;
+    persist(messages.map(m => rowOf(id, m))).then(() => broadcast('history', { sessionId: id }));
   });
   return e;
 }
@@ -154,8 +181,23 @@ app.post('/sessions/:id/send', async (req, res) => {
     const { to, body } = req.body || {};
     const jid = String(to).includes('@') ? to : `${String(to).replace(/^0/, '20')}@s.whatsapp.net`;
     const sent = await e.sock.sendMessage(jid, { text: body });
-    res.json({ ok: true, id: sent?.key?.id });
+    const waid = sent?.key?.id || ('s' + Date.now());
+    persist([{ id: e.id + '_' + waid, msg_id: waid, session_id: e.id, chat_jid: jid, from_me: true, name: null, body, ts: Math.floor(Date.now() / 1000) }]);
+    res.json({ ok: true, id: waid });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+// stored messages for a number (history + persistence)
+app.get('/messages', async (req, res) => {
+  try {
+    const session = req.query.session;
+    const limit = Math.min(parseInt(req.query.limit) || 1000, 5000);
+    let q = supabase.from('wa_messages').select('*').order('ts', { ascending: true }).limit(limit);
+    if (session) q = q.eq('session_id', session);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    res.json(data || []);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 const server = app.listen(PORT, () => console.log(`[bridge] listening on :${PORT}`));
