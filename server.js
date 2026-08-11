@@ -49,13 +49,20 @@ async function persist(rows) {
   try { await supabase.from('wa_messages').upsert(rows, { onConflict: 'id' }); }
   catch (e) { console.warn('[wa] persist', e.message || e); }
 }
+// resolve the real phone number (WhatsApp may address chats via @lid instead of the phone)
+function bestPhone(m) {
+  const cands = [m.key?.remoteJid, m.key?.remoteJidAlt, m.key?.participant, m.key?.participantAlt].filter(Boolean).map(String);
+  const pn = cands.find(j => j.endsWith('@s.whatsapp.net'));
+  const jid = pn || cands[0] || '';
+  return jid.split('@')[0].split(':')[0].replace(/\D/g, '');
+}
 function rowOf(sid, m) {
   const jid = m.key?.remoteJid;
   if (!jid || jid === 'status@broadcast') return null;
   const body = textOf(m);
   if (!body) return null;
   const waid = m.key.id || ('x' + Math.random().toString(36).slice(2));
-  return { id: sid + '_' + waid, msg_id: waid, session_id: sid, chat_jid: jid, from_me: !!m.key.fromMe, name: m.pushName || null, body, ts: Number(m.messageTimestamp) || Math.floor(Date.now() / 1000) };
+  return { id: sid + '_' + waid, msg_id: waid, session_id: sid, chat_jid: jid, phone: bestPhone(m), from_me: !!m.key.fromMe, name: m.pushName || null, body, ts: Number(m.messageTimestamp) || Math.floor(Date.now() / 1000) };
 }
 
 const app = express();
@@ -107,7 +114,7 @@ async function startSession(id, label, assignedTo) {
     for (const m of messages) {
       const text = textOf(m); const jid = m.key?.remoteJid;
       if (!jid || jid === 'status@broadcast' || !text) continue;
-      broadcast('message', { sessionId: id, id: m.key.id, from: jid, fromMe: !!m.key.fromMe, name: m.pushName || null, text, timestamp: Number(m.messageTimestamp) });
+      broadcast('message', { sessionId: id, id: m.key.id, from: jid, phone: bestPhone(m), fromMe: !!m.key.fromMe, name: m.pushName || null, text, timestamp: Number(m.messageTimestamp) });
       rows.push(rowOf(id, m));
     }
     persist(rows);
