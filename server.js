@@ -49,9 +49,11 @@ async function persist(rows) {
   try { await supabase.from('wa_messages').upsert(rows, { onConflict: 'id' }); }
   catch (e) { console.warn('[wa] persist', e.message || e); }
 }
-// resolve the real phone number (WhatsApp may address chats via @lid instead of the phone)
+// resolve the real phone number (WhatsApp may address chats via @lid instead of the phone).
+// Newer Baileys attaches the phone-number JID on *Pn fields for @lid chats — prefer those.
 function bestPhone(m) {
-  const cands = [m.key?.remoteJid, m.key?.remoteJidAlt, m.key?.participant, m.key?.participantAlt].filter(Boolean).map(String);
+  const k = m.key || {};
+  const cands = [k.senderPn, k.participantPn, k.remoteJidAlt, k.remoteJid, k.participantAlt, k.participant].filter(Boolean).map(String);
   const pn = cands.find(j => j.endsWith('@s.whatsapp.net'));
   const jid = pn || cands[0] || '';
   return jid.split('@')[0].split(':')[0].replace(/\D/g, '');
@@ -186,16 +188,44 @@ app.post('/sessions/:id/send', async (req, res) => {
     const e = sessions.get(req.params.id);
     if (!e || !e.sock) throw new Error('الرقم غير متصل');
     let { to, chatJid, body } = req.body || {};
-    to = String(to || '');
-    // WhatsApp can't send to a @lid address — always send to the phone (@s.whatsapp.net)
-    let jid;
-    if (to.endsWith('@s.whatsapp.net')) jid = to;
-    else { let d = to.replace(/\D/g, ''); if (d.startsWith('0')) d = '20' + d.slice(1); else if (d.length === 10) d = '20' + d; jid = d + '@s.whatsapp.net'; }
-    const sent = await e.sock.sendMessage(jid, { text: String(body || '') });
-    const waid = sent?.key?.id || ('s' + Date.now());
-    const cj = chatJid || jid;   // keep the sent message in the same conversation the user is viewing
-    persist([{ id: e.id + '_' + waid, msg_id: waid, session_id: e.id, chat_jid: cj, phone: jid.split('@')[0], from_me: true, name: null, body, ts: Math.floor(Date.now() / 1000) }]);
-    res.json({ ok: true, id: waid });
+    to = String(to || ''); chatJid = String(chatJid || '');
+    const content = { text: String(body || '') };
+
+    // Build recipient candidates in priority order. Fabricating <lid>@s.whatsapp.net from
+    // @lid digits was the cause of the "Cannot read properties of undefined (reading 'id')" crash,
+    // so for @lid chats we (1) try to resolve the real phone via Baileys' LID mapping, then
+    // (2) fall back to replying to the exact @lid conversation address.
+    const targets = [];
+    const addPhone = (v) => { let d = String(v || '').replace(/\D/g, ''); if (!d) return; if (d.startsWith('0')) d = '20' + d.slice(1); else if (d.length === 10) d = '20' + d; targets.push(d + '@s.whatsapp.net'); };
+    if (chatJid.endsWith('@lid')) {
+      try {
+        const lm = e.sock.signalRepository && e.sock.signalRepository.lidMapping;
+        const pn = lm && (lm.getPNForLID ? lm.getPNForLID(chatJid) : (lm.getPNFromLID ? lm.getPNFromLID(chatJid) : null));
+        if (pn && String(pn).endsWith('@s.whatsapp.net')) targets.push(String(pn));
+      } catch (_) {}
+      if (to.includes('@s.whatsapp.net')) targets.push(to);
+      targets.push(chatJid); // reply to the exact @lid conversation
+    } else if (chatJid.includes('@')) {
+      targets.push(chatJid);                 // @s.whatsapp.net or @g.us — send as-is
+    } else if (to.includes('@')) {
+      targets.push(to);
+    } else {
+      addPhone(to);
+    }
+    if (!targets.length) throw new Error('لا يوجد مستلم صالح');
+
+    let sent, usedJid, lastErr;
+    for (const t of targets) {
+      try { sent = await e.sock.sendMessage(t, content); usedJid = t; break; }
+      catch (err) { lastErr = err; console.warn('[send] target failed', t, String(err && err.message || err)); }
+    }
+    if (!sent) throw (lastErr || new Error('فشل الإرسال لكل العناوين'));
+
+    const waid = (sent.key && sent.key.id) || ('s' + Date.now());
+    const cj = chatJid || usedJid;   // keep the sent message in the conversation the user is viewing
+    const phone = (usedJid && usedJid.endsWith('@s.whatsapp.net')) ? usedJid.split('@')[0] : (to.replace(/\D/g, '') || (usedJid || '').split('@')[0].replace(/\D/g, ''));
+    persist([{ id: e.id + '_' + waid, msg_id: waid, session_id: e.id, chat_jid: cj, phone, from_me: true, name: null, body, ts: Math.floor(Date.now() / 1000) }]);
+    res.json({ ok: true, id: waid, to: usedJid });
   } catch (e) { console.error('[send]', e); res.status(500).json({ ok: false, error: String((e && e.message) || e) }); }
 });
 
