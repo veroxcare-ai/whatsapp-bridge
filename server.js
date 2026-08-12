@@ -184,14 +184,19 @@ app.delete('/sessions/:id', async (req, res) => {
 app.post('/sessions/:id/send', async (req, res) => {
   try {
     const e = sessions.get(req.params.id);
-    if (!e || !e.sock) throw new Error('number not connected');
-    const { to, body } = req.body || {};
-    const jid = String(to).includes('@') ? to : `${String(to).replace(/^0/, '20')}@s.whatsapp.net`;
-    const sent = await e.sock.sendMessage(jid, { text: body });
+    if (!e || !e.sock) throw new Error('الرقم غير متصل');
+    let { to, chatJid, body } = req.body || {};
+    to = String(to || '');
+    // WhatsApp can't send to a @lid address — always send to the phone (@s.whatsapp.net)
+    let jid;
+    if (to.endsWith('@s.whatsapp.net')) jid = to;
+    else { let d = to.replace(/\D/g, ''); if (d.startsWith('0')) d = '20' + d.slice(1); else if (d.length === 10) d = '20' + d; jid = d + '@s.whatsapp.net'; }
+    const sent = await e.sock.sendMessage(jid, { text: String(body || '') });
     const waid = sent?.key?.id || ('s' + Date.now());
-    persist([{ id: e.id + '_' + waid, msg_id: waid, session_id: e.id, chat_jid: jid, from_me: true, name: null, body, ts: Math.floor(Date.now() / 1000) }]);
+    const cj = chatJid || jid;   // keep the sent message in the same conversation the user is viewing
+    persist([{ id: e.id + '_' + waid, msg_id: waid, session_id: e.id, chat_jid: cj, phone: jid.split('@')[0], from_me: true, name: null, body, ts: Math.floor(Date.now() / 1000) }]);
     res.json({ ok: true, id: waid });
-  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+  } catch (e) { console.error('[send]', e); res.status(500).json({ ok: false, error: String((e && e.message) || e) }); }
 });
 
 // stored messages for a number (history + persistence)
