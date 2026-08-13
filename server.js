@@ -149,8 +149,20 @@ async function loadRegistry() {
 }
 
 // ---- HTTP API ----
-const BUILD = 'lid-send-v3-2026-08-13';
+const BUILD = 'diag-me-v4-2026-08-13';
 app.get('/', (_q, res) => res.json({ ok: true, service: 'verox-whatsapp-bridge', build: BUILD, numbers: sessions.size }));
+// diagnostics — is the connected account identity (creds.me) present? (send needs creds.me.id)
+app.get('/diag', (_q, res) => {
+  const out = [];
+  for (const [id, e] of sessions) {
+    const creds = e.sock && e.sock.authState && e.sock.authState.creds;
+    const cm = creds && creds.me;
+    out.push({ id, status: e.status, hasSock: !!e.sock, user: (e.sock && e.sock.user && e.sock.user.id) || null,
+      me: cm ? { id: cm.id, lid: cm.lid || null, name: cm.name || null } : null,
+      registered: creds ? !!creds.registered : null, platform: (creds && creds.platform) || null });
+  }
+  res.json({ build: BUILD, sessions: out });
+});
 
 app.get('/sessions', (_q, res) => res.json([...sessions.values()].map(view)));
 
@@ -200,6 +212,8 @@ app.post('/sessions/:id/send', async (req, res) => {
   try {
     const e = sessions.get(req.params.id);
     if (!e || !e.sock) throw new Error('الرقم غير متصل');
+    const _me = e.sock.authState && e.sock.authState.creds && e.sock.authState.creds.me;
+    if (!_me || !_me.id) throw new Error('الجلسة غير مكتملة (هوية الحساب مفقودة) — أعد ربط الرقم بمسح QR من جديد.');
     let { to, chatJid, body } = req.body || {};
     to = String(to || ''); chatJid = String(chatJid || '');
     const content = { text: String(body || '') };
