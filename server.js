@@ -58,6 +58,16 @@ function bestPhone(m) {
   const jid = pn || cands[0] || '';
   return jid.split('@')[0].split(':')[0].replace(/\D/g, '');
 }
+// resolve a @lid chat address to the real phone digits via Baileys' LID→PN mapping (best-effort)
+async function resolvePN(sock, lid) {
+  try {
+    const lm = sock && sock.signalRepository && sock.signalRepository.lidMapping;
+    const fn = lm && (lm.getPNForLID || lm.getPNFromLID);
+    if (!fn) return '';
+    let pn = fn.call(lm, lid); if (pn && typeof pn.then === 'function') pn = await pn;
+    return (pn && String(pn).endsWith('@s.whatsapp.net')) ? String(pn).split('@')[0].replace(/\D/g, '') : '';
+  } catch (_) { return ''; }
+}
 function rowOf(sid, m) {
   const jid = m.key?.remoteJid;
   if (!jid || jid === 'status@broadcast') return null;
@@ -110,14 +120,16 @@ async function startSession(id, label, assignedTo) {
       if (!e.reconnecting) { e.reconnecting = true; setTimeout(() => { e.reconnecting = false; startSession(id).catch(err => console.error(`[wa:${id}] restart`, err)); }, 3000); }
     }
   });
-  sock.ev.on('messages.upsert', ({ messages, type }) => {
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify' && type !== 'append') return;
     const rows = [];
     for (const m of messages) {
       const text = textOf(m); const jid = m.key?.remoteJid;
       if (!jid || jid === 'status@broadcast' || !text) continue;
-      broadcast('message', { sessionId: id, id: m.key.id, from: jid, phone: bestPhone(m), fromMe: !!m.key.fromMe, name: m.pushName || null, text, timestamp: Number(m.messageTimestamp) });
-      rows.push(rowOf(id, m));
+      let phone = bestPhone(m);
+      if (jid.endsWith('@lid') && !/^\d{7,13}$/.test(phone)) { const pn = await resolvePN(sock, jid); if (pn) phone = pn; }
+      broadcast('message', { sessionId: id, id: m.key.id, from: jid, phone, fromMe: !!m.key.fromMe, name: m.pushName || null, text, timestamp: Number(m.messageTimestamp) });
+      const row = rowOf(id, m); if (row) { row.phone = phone; rows.push(row); }
     }
     persist(rows);
   });
@@ -137,7 +149,8 @@ async function loadRegistry() {
 }
 
 // ---- HTTP API ----
-app.get('/', (_q, res) => res.json({ ok: true, service: 'verox-whatsapp-bridge', numbers: sessions.size }));
+const BUILD = 'lid-send-v3-2026-08-13';
+app.get('/', (_q, res) => res.json({ ok: true, service: 'verox-whatsapp-bridge', build: BUILD, numbers: sessions.size }));
 
 app.get('/sessions', (_q, res) => res.json([...sessions.values()].map(view)));
 
@@ -196,12 +209,12 @@ app.post('/sessions/:id/send', async (req, res) => {
     // so for @lid chats we (1) try to resolve the real phone via Baileys' LID mapping, then
     // (2) fall back to replying to the exact @lid conversation address.
     const targets = [];
-    const addPhone = (v) => { let d = String(v || '').replace(/\D/g, ''); if (!d) return; if (d.startsWith('0')) d = '20' + d.slice(1); else if (d.length === 10) d = '20' + d; targets.push(d + '@s.whatsapp.net'); };
+    const addPhone = (v) => { let d = String(v || '').replace(/\D/g, ''); if (!d) return; if (d.startsWith('00')) d = d.slice(2); if (d.startsWith('0')) d = '20' + d.slice(1); else if (d.length === 10) d = '20' + d; targets.push(d + '@s.whatsapp.net'); };
     if (chatJid.endsWith('@lid')) {
       try {
         const lm = e.sock.signalRepository && e.sock.signalRepository.lidMapping;
-        const pn = lm && (lm.getPNForLID ? lm.getPNForLID(chatJid) : (lm.getPNFromLID ? lm.getPNFromLID(chatJid) : null));
-        if (pn && String(pn).endsWith('@s.whatsapp.net')) targets.push(String(pn));
+        const fn = lm && (lm.getPNForLID || lm.getPNFromLID);
+        if (fn) { let pn = fn.call(lm, chatJid); if (pn && typeof pn.then === 'function') pn = await pn; if (pn && String(pn).endsWith('@s.whatsapp.net')) targets.push(String(pn)); }
       } catch (_) {}
       if (to.includes('@s.whatsapp.net')) targets.push(to);
       targets.push(chatJid); // reply to the exact @lid conversation
