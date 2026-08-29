@@ -74,7 +74,8 @@ function rowOf(sid, m) {
   const body = textOf(m);
   if (!body) return null;
   const waid = m.key.id || ('x' + Math.random().toString(36).slice(2));
-  return { id: sid + '_' + waid, msg_id: waid, session_id: sid, chat_jid: jid, phone: bestPhone(m), from_me: !!m.key.fromMe, name: m.pushName || null, body, ts: Number(m.messageTimestamp) || Math.floor(Date.now() / 1000) };
+  // never store our own (clinic) pushName as the contact name on outgoing messages — it made every chat show "Verox"
+  return { id: sid + '_' + waid, msg_id: waid, session_id: sid, chat_jid: jid, phone: bestPhone(m), from_me: !!m.key.fromMe, name: m.key.fromMe ? null : (m.pushName || null), body, ts: Number(m.messageTimestamp) || Math.floor(Date.now() / 1000) };
 }
 
 const app = express();
@@ -128,7 +129,7 @@ async function startSession(id, label, assignedTo) {
       if (!jid || jid === 'status@broadcast' || !text) continue;
       let phone = bestPhone(m);
       if (jid.endsWith('@lid') && !/^\d{7,13}$/.test(phone)) { const pn = await resolvePN(sock, jid); if (pn) phone = pn; }
-      broadcast('message', { sessionId: id, id: m.key.id, from: jid, phone, fromMe: !!m.key.fromMe, name: m.pushName || null, text, timestamp: Number(m.messageTimestamp) });
+      broadcast('message', { sessionId: id, id: m.key.id, from: jid, phone, fromMe: !!m.key.fromMe, name: m.key.fromMe ? null : (m.pushName || null), text, timestamp: Number(m.messageTimestamp) });
       const row = rowOf(id, m); if (row) { row.phone = phone; rows.push(row); }
     }
     persist(rows);
@@ -149,7 +150,7 @@ async function loadRegistry() {
 }
 
 // ---- HTTP API ----
-const BUILD = 'diag-me-v4-2026-08-13';
+const BUILD = 'sync-fix-v5-2026-08-22';
 app.get('/', (_q, res) => res.json({ ok: true, service: 'verox-whatsapp-bridge', build: BUILD, numbers: sessions.size }));
 // diagnostics — is the connected account identity (creds.me) present? (send needs creds.me.id)
 app.get('/diag', (_q, res) => {
@@ -261,7 +262,9 @@ app.get('/messages', async (req, res) => {
   try {
     const session = req.query.session;
     const limit = Math.min(parseInt(req.query.limit) || 1000, 5000);
-    let q = supabase.from('wa_messages').select('*').order('ts', { ascending: true }).limit(limit);
+    // newest-first so recent messages are always returned (PostgREST caps rows ~1000; ascending order used to
+    // return only the OLDEST messages, hiding everything new on refresh). Frontend re-sorts ascending for display.
+    let q = supabase.from('wa_messages').select('*').order('ts', { ascending: false }).limit(limit);
     if (session) q = q.eq('session_id', session);
     const { data, error } = await q;
     if (error) throw new Error(error.message);
